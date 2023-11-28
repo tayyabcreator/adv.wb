@@ -1,4 +1,10 @@
-from flask import Flask, flash,render_template,request,redirect,url_for
+from flask import Flask, render_template, url_for, redirect , request , flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import UserMixin, login_user, LoginManager, login_required, logout_user, current_user
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField
+from wtforms.validators import InputRequired, Length, ValidationError
+from flask_bcrypt import Bcrypt
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 from werkzeug.utils import secure_filename
@@ -8,16 +14,65 @@ from datetime import datetime, timedelta
 from flask import send_from_directory
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI']='sqlite:///db.sqlite'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS']=False
-db= SQLAlchemy(app)
 
-app.secret_key = secrets.token_hex(16)
+bcrypt = Bcrypt(app)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+app.config['SECRET_KEY'] = 'thisisasecretkey'
+db = SQLAlchemy(app)
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
 class Todo(db.Model):
     task_id=db.Column(db.Integer,primary_key=True)
     name=db.Column(db.String(100))
     date=db.Column(db.String(100))
     done=db.Column(db.Boolean)
+
+
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(20), nullable=False, unique=True)
+    password = db.Column(db.String(80), nullable=False)
+
+
+class RegisterForm(FlaskForm):
+    username = StringField(validators=[
+                           InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Username"})
+
+    password = PasswordField(validators=[
+                             InputRequired(), Length(min=8, max=20)], render_kw={"placeholder": "Password"})
+
+    submit = SubmitField('Register')
+
+    def validate_username(self, username):
+        existing_user_username = User.query.filter_by(
+                username=username.data).first()
+        if existing_user_username:
+            raise ValidationError(
+                    'That username already exists. Please choose a different one.')
+
+
+class LoginForm(FlaskForm):
+    username = StringField(validators=[
+                           InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Username"})
+
+    password = PasswordField(validators=[
+                             InputRequired(), Length(min=8, max=20)], render_kw={"placeholder": "Password"})
+
+    submit = SubmitField('Login')
+
+
+@app.route('/')
+def home():
+    return render_template('home.html')
+
 
 def get_task_with_least_time():
     pending_tasks = Todo.query.filter_by(done=False).all()
@@ -41,14 +96,6 @@ def get_task_with_least_time():
         return min_time_task, min_time_left.days if min_time_task else None
 
     return None, None
-
-
-@app.route('/')
-def home():
-    upcoming_task, days_left = get_task_with_least_time()
-    todo_list = Todo.query.all()
-    return render_template('index.html', todo_list=todo_list, upcoming_task=upcoming_task, days_left=days_left ,time_left=time_left)
-
 @app.route('/add', methods=['POST'])
 def add():
     name = request.form.get("taskname")
@@ -61,12 +108,12 @@ def add():
     if due_date < current_date:
         # Handle the case where the due date is earlier than the current date
         flash('Due date cannot be earlier than the current date')
-        return redirect(url_for('home'))
+        return redirect(url_for('dashboard'))
 
     new_task = Todo(name=name, date=date, done=False)
     db.session.add(new_task)
     db.session.commit()
-    return redirect(url_for("home"))
+    return redirect(url_for("dashboard"))
 
 
 @app.route('/update/<int:todo_id>')
@@ -74,7 +121,7 @@ def update(todo_id):
     todo= Todo.query.get(todo_id)
     todo.done=not todo.done
     db.session.commit()
-    return redirect(url_for("home"))
+    return redirect(url_for("dashboard"))
 
 
 @app.route('/delete/<int:todo_id>')
@@ -82,7 +129,7 @@ def delete(todo_id):
     todo= Todo.query.get(todo_id)
     db.session.delete(todo)
     db.session.commit()
-    return redirect(url_for("home"))
+    return redirect(url_for("dashboard"))
 
 @app.route('/time_left/<int:todo_id>')
 def time_left(todo_id):
@@ -105,7 +152,6 @@ def time_left(todo_id):
     return "No due date set"
 
 
-upload = 'C:/Users/HP/Downloads/todo_app-main/todo_app-main/Upload'
 upload_folder = os.path.join("static","uploads")
 app.config['UPLOAD_FOLDER'] = upload_folder  # Use 'UPLOAD_FOLDER' instead of 'UPLOAD'
 
@@ -119,7 +165,7 @@ def upload_file():
             file.save(file_path.replace("\\","/"))
             todo_list=Todo.query.all()
             upcoming_task, days_left = get_task_with_least_time()
-            return render_template('index.html',todo_list=todo_list,upcoming_task=upcoming_task, days_left=days_left , time_left=time_left,img=file_path)
+            return render_template('dashboard.html',todo_list=todo_list,upcoming_task=upcoming_task, days_left=days_left , time_left=time_left,img=file_path)
     return render_template('index.html')
 
 
@@ -127,7 +173,7 @@ def upload_file():
 
 def get_closest_task():
     todo_list = Todo.query.all()
-    
+
     # Get tasks with due dates and calculate time left
     tasks_with_due_dates = [task for task in todo_list if task.date]
     current_date = datetime.now().date()
@@ -140,7 +186,51 @@ def get_closest_task():
         return sorted_tasks[0], (datetime.strptime(sorted_tasks[0].date, '%Y-%m-%d').date() - current_date)
     else:
         return None, None
-    
 
-if __name__=='__main__':
-    app.run(debug=False)
+
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(username=form.username.data).first()
+        if user:
+            if bcrypt.check_password_hash(user.password, form.password.data):
+                login_user(user)
+                return redirect(url_for('dashboard'))
+    return render_template('loginv1.html', form=form)
+
+
+@app.route('/dashboard', methods=['GET', 'POST'])
+@login_required
+def dashboard():
+    upcoming_task, days_left = get_task_with_least_time()
+    todo_list = Todo.query.all()
+    return render_template('dashboard.html', todo_list=todo_list, upcoming_task=upcoming_task, days_left=days_left ,time_left=time_left)
+
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+
+@ app.route('/register', methods=['GET', 'POST'])
+def register():
+    form = RegisterForm()
+    if form.validate_on_submit():
+        hashed_password = bcrypt.generate_password_hash(form.password.data)
+        new_user = User(username=form.username.data, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for('login'))
+
+    return render_template('register.html', form=form)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
